@@ -33,7 +33,7 @@ impl<T> Joque<T> {
             panic!("let's not");
         }
         let left = width / 2;
-        let right = (left as usize + 1) << 32;
+        let right = (left as usize) << 32;
         Joque {
             deque: std::iter::from_fn(|| Some(AtomicUsize::new(0)))
                 .take(width as usize)
@@ -55,11 +55,11 @@ impl<T> Joque<T> {
         )))))
     }
 
-    fn build_null_rj() -> *mut (u32, *mut T) {
+    fn build_raw_null_rj() -> *mut (u32, *mut T) {
         Box::into_raw(Box::new((u32::MAX, std::ptr::null_mut())))
     }
 
-    fn build_rj(op_id: u32, item: Box<T>) -> *mut (u32, *mut T) {
+    fn build_raw_rj(op_id: u32, item: Box<T>) -> *mut (u32, *mut T) {
         Box::into_raw(Box::new((op_id, Box::into_raw(item))))
     }
 
@@ -78,7 +78,7 @@ impl<T> Joque<T> {
                 let success_op = ((entry & RIGHTMASK) >> 32) as u32;
                 self.backing[backing_idx as usize]
                     .0
-                    .store(Joque::build_rj(success_op, item), Ordering::SeqCst);
+                    .store(Joque::build_raw_rj(success_op, item), Ordering::SeqCst);
                 self.leftright.fetch_sub(1, Ordering::Acquire);
                 break;
             }
@@ -108,7 +108,7 @@ impl<T> Joque<T> {
                 // println!("Seeking from {}, ok", lval & LEFTMASK);
                 let out = self.backing[(lval & LEFTMASK) as usize]
                     .0
-                    .swap(Joque::build_null_rj(), Ordering::Acquire);
+                    .swap(Joque::build_raw_null_rj(), Ordering::Acquire);
 
                 unsafe {
                     let output = Box::from_raw(out);
@@ -161,7 +161,7 @@ impl<T> Joque<T> {
                 let success_op = ((entry & RIGHTMASK) >> 32) as u32;
                 self.backing[backing_idx as usize]
                     .0
-                    .store(Joque::build_rj(success_op, item), Ordering::SeqCst);
+                    .store(Joque::build_raw_rj(success_op, item), Ordering::SeqCst);
                 self.leftright.fetch_add(ONE, Ordering::Acquire); // notice using ONE; a shifted value for the halfreg
                 break;
             }
@@ -192,7 +192,7 @@ impl<T> Joque<T> {
                 // println!("Seeking from {}, ok", lval & LEFTMASK);
                 let out = self.backing[(rval & LEFTMASK) as usize]
                     .0
-                    .swap(Joque::build_null_rj(), Ordering::Acquire);
+                    .swap(Joque::build_raw_null_rj(), Ordering::Acquire);
 
                 unsafe {
                     let output = Box::from_raw(out);
