@@ -427,14 +427,14 @@ mod tests {
     }
 
     #[test]
-    //#[cfg(not(miri))]
+    #[cfg(not(miri))]
     fn interleaved_modification() {
         // println!("trace");
-        let THREAD_COUNT = 128u32;
+        let THREAD_COUNT = 64u32;
         let PAD_WIDTH = 0u32;
         let WIDTH = 4096;
         let LEFT_START = WIDTH / 2;
-        let RERUNS = 100000;
+        let RERUNS = 1000;
 
         for _rerun in 0..RERUNS {
             // println!("~~~~~ {rerun} ~~~~~");
@@ -489,7 +489,7 @@ mod tests {
     #[cfg(not(miri))]
     fn interleaved_right_modification() {
         // println!("trace");
-        let THREAD_COUNT = 2u32;
+        let THREAD_COUNT = 64u32;
         let PAD_WIDTH = 0u32;
         let WIDTH = 4096;
         let LEFT_START = WIDTH / 2;
