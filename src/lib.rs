@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+#![allow(unreachable_code)]
 use std::{
     sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering},
     thread,
@@ -26,8 +27,25 @@ const LEFTMASK: usize = 0x00000000_FFFFFFFF;
 const RIGHTMASK: usize = 0xFFFFFFFF_00000000;
 const ONE: usize = 0x00000001_00000000;
 
+impl<T> Drop for Joque<T> {
+        fn drop(&mut self) {
+            unsafe {
+                while let Some(rec) = self.backing.pop() {
+                    let atm = Box::from_raw(rec.0.into_inner());
+                    if !atm.1.is_null() {
+                        let _ = Box::from_raw(atm.1);
+                        // drop inner pointer
+                    }
+                    // drop recordjoque
+                }
+                while let Some(_) = self.deque.pop() { }
+            }
+        }
+}
+
 #[allow(dead_code)]
 impl<T> Joque<T> {
+
     pub fn new(width: u32) -> Self {
         if width < 10 {
             panic!("let's not");
@@ -63,6 +81,18 @@ impl<T> Joque<T> {
         Box::into_raw(Box::new((op_id, Box::into_raw(item))))
     }
 
+    fn release_null_rj(raw_rj: *mut (u32, *mut T)) -> Option<Box<T>> {
+        unsafe { 
+            let n = Box::from_raw(raw_rj);
+            if !n.1.is_null() { 
+                let m = Box::from_raw(n.1);
+                return Some(m);
+            } else {
+                None 
+            }// free null
+        } // free rj
+    }
+
     pub fn push_front(&self, item: Box<T>) {
         let backing_idx = self.idx.fetch_add(1, Ordering::Acquire); // TODO: 💀 after 400 write/read cycles
         loop {
@@ -76,9 +106,10 @@ impl<T> Joque<T> {
                 .is_ok()
             {
                 let success_op = ((entry & RIGHTMASK) >> 32) as u32;
-                self.backing[backing_idx as usize]
+                let release = self.backing[backing_idx as usize]
                     .0
-                    .store(Joque::build_raw_rj(success_op, item), Ordering::SeqCst);
+                    .swap(Joque::build_raw_rj(success_op, item), Ordering::SeqCst);
+                Joque::release_null_rj(release);
                 self.leftright.fetch_sub(1, Ordering::Acquire);
                 break;
             }
@@ -137,7 +168,7 @@ impl<T> Joque<T> {
                         println!("Oh shit, oh shit, oh shit, put it back!!");
                         self.backing[(lval & LEFTMASK) as usize]
                             .0
-                            .store(out, Ordering::Release);
+                            .store(out, Ordering::Release); // TODO: 💀 maybe a memory leak, see `release_null_rj`
                         return None;
                     }
                 }
@@ -159,9 +190,10 @@ impl<T> Joque<T> {
                 .is_ok()
             {
                 let success_op = ((entry & RIGHTMASK) >> 32) as u32;
-                self.backing[backing_idx as usize]
+                let release = self.backing[backing_idx as usize]
                     .0
-                    .store(Joque::build_raw_rj(success_op, item), Ordering::SeqCst);
+                    .swap(Joque::build_raw_rj(success_op, item), Ordering::SeqCst);
+                Joque::release_null_rj(release);
                 self.leftright.fetch_add(ONE, Ordering::Acquire); // notice using ONE; a shifted value for the halfreg
                 break;
             }
@@ -342,7 +374,7 @@ mod tests {
     pub fn basic_wrap() {
         let deque = Joque::new(25);
 
-        for i in 0..49 {
+        for _i in 0..49 {
             // println!("dah dah dah, {i}");
             deque.push_front(Box::new("oogah"));
             deque.pop_back();
@@ -395,14 +427,14 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(miri))]
+    //#[cfg(not(miri))]
     fn interleaved_modification() {
         // println!("trace");
-        let THREAD_COUNT = 2u32;
+        let THREAD_COUNT = 128u32;
         let PAD_WIDTH = 0u32;
         let WIDTH = 4096;
         let LEFT_START = WIDTH / 2;
-        let RERUNS = 1000;
+        let RERUNS = 100000;
 
         for _rerun in 0..RERUNS {
             // println!("~~~~~ {rerun} ~~~~~");
@@ -574,8 +606,8 @@ mod tests {
         }
     }
 
-    #[cfg(miri)]
     #[test]
+    #[cfg(miri)]
     fn interleaved_right_modification_tiny_miri() {
         // println!("trace");
         let THREAD_COUNT = 4u32;
