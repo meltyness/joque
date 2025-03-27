@@ -11,10 +11,13 @@ struct Joque<T> {
     
     // 💡✨: 128 entry chunks, with 128/bitwise find empty, NO GC. 
     // 💡✨: multiple reclamation stacks, thread across them when doing reclamation
-    backing: Vec<AtomicPtr<T>>, // zero is the null ptr in this reference frame
+            // caller responsible for predicting max simult. writers
+    backing: Vec<RecordJoque<T>>, // zero is the null ptr in this reference frame
     op_id: AtomicU32,               
     idx: AtomicU32,
 }
+
+struct RecordJoque<T>(AtomicPtr<(u32, *mut T)>);
 
 const LEFTMASK: usize = 0x00000000_FFFFFFFF;
 const RIGHTMASK: usize = 0xFFFFFFFF_00000000;
@@ -25,25 +28,59 @@ impl<T> Joque<T> {
     pub fn new(width: u32) -> Self {
         if width < 10 { panic! ("let's not"); }
         let left = width / 2;
-        let right = (left as usize) << 32;
+        let right = (left as usize + 1) << 32;
         Joque {
             deque: std::iter::from_fn(|| Some(AtomicUsize::new(0))).take(width as usize).collect(), // TODO: 💀 dynamically resizable
             leftright: AtomicUsize::new(left as usize | right),
             capacity: width,
-            backing: std::iter::from_fn(|| Some(AtomicPtr::new(std::ptr::null_mut()))).take((width*4) as usize).collect(), // TODO: 💀 dynamically resizable
+            backing: std::iter::from_fn(
+                || Some(Joque::build_blank_rj())
+                )
+                .take(width as usize * 4)
+                .collect(), // TODO: 💀 dynamically resizable
             op_id: AtomicU32::new(0),
             idx: AtomicU32::new(1),
         }
     }
 
+    fn build_blank_rj() -> RecordJoque<T> {
+        RecordJoque(
+            AtomicPtr::new(
+                Box::into_raw(
+                    Box::new(
+                        (u32::MAX, std::ptr::null_mut())
+                    )
+                )
+            )
+        )
+    }
+
+    fn build_null_rj() -> *mut (u32, *mut T) {
+        Box::into_raw(
+            Box::new(
+                (u32::MAX, std::ptr::null_mut())
+            )
+        )
+    }
+
+    fn build_rj(op_id: u32, item: Box<T>) -> *mut (u32, *mut T) {
+        Box::into_raw(
+            Box::new(
+                (op_id, Box::into_raw(item))
+            )
+        )
+    }
+
     pub fn push_front(&self, item: Box<T>) {
         let backing_idx = self.idx.fetch_add(1, Ordering::Acquire); // TODO: 💀 after 400 write/read cycles
-        self.backing[backing_idx as usize].store(Box::into_raw(item), Ordering::SeqCst);
         loop {
-            let this_left = self.fetch_extent_acq().0;
+            let this_left = self.fetch_extent_acq().0 % self.capacity;            
+            // println!("Trying to push {this_left}");
             let lval = self.deque[(this_left % self.capacity) as usize].load(Ordering::Acquire);
-            let entry = ((self.op_id.fetch_add(1, Ordering::Acquire) as usize) << 32) | backing_idx as usize;
+            let entry = ((self.op_id.fetch_add(1, Ordering::Acquire) as usize + 1) << 32) | backing_idx as usize;
             if self.deque[(this_left % self.capacity) as usize].compare_exchange(lval, entry, Ordering::Acquire, Ordering::Acquire).is_ok() {
+                let success_op = ((entry & RIGHTMASK) >> 32) as u32;
+                self.backing[backing_idx as usize].0.store(Joque::build_rj(success_op, item), Ordering::SeqCst);
                 self.leftright.fetch_sub(1, Ordering::Acquire);
                 break;
             }
@@ -54,27 +91,43 @@ impl<T> Joque<T> {
         loop {
             let (sens_left, sens_right) = self.fetch_extent_rel();
             if sens_left % self.capacity == sens_right % self.capacity { return None; }
-            let this_left = sens_left + 1;
+            let this_left = sens_left + 1 % self.capacity;
             let lval = self.deque[(this_left % self.capacity) as usize].load(Ordering::Acquire);
             if lval & LEFTMASK == 0 { thread::yield_now(); return None; }
             let idx = 0;
-            let entry = ((self.op_id.fetch_add(1, Ordering::Release) as usize) << 32) | idx;
-            if let Ok(_old_one) = self.deque[(this_left % self.capacity) as usize]
+            let entry = ((self.op_id.fetch_add(1, Ordering::Release) as usize + 1) << 32) | idx;
+            if let Ok(old_one) = self.deque[(this_left % self.capacity) as usize]
                                             .compare_exchange(lval, entry, Ordering::Release, Ordering::Relaxed) {
                 // println!("Seeking from {}, ok", lval & LEFTMASK);
-                let out = self.backing[(lval & LEFTMASK) as usize].swap(std::ptr::null_mut(), Ordering::Release );
-                self.leftright.fetch_add(1, Ordering::Release);
+                let out = self.backing[(lval & LEFTMASK) as usize].0.swap(Joque::build_null_rj(), Ordering::Acquire );
+
                 unsafe { 
-                    if out.is_null() {
-                        // println!("Well that was weird I couldn't pull {}", lval & LEFTMASK);
+                    let output = Box::from_raw(out);
+                    if (*output).1.is_null() {
+                        // println!("Well that was weird I couldn't pull {} cause out was null", lval & LEFTMASK);
                         // println!("Here's some other stuff: ");
                         // println!("Directed pop state: {this_left}");
                         // println!("Claimed Op ID: {}", entry >> 32);
                         // println!("Old Cmp Data: {} {}", old_one & RIGHTMASK >> 32, old_one & LEFTMASK);
-                        panic!("This should not occur");
-                        //return None;
+                        // panic!("This should not occur");
+                        // TODO: 💀 is this even recoverable? ... how?
+                        // panic!("should never happen;");
+                        return None;
+                    } else if (*out).0 == ((old_one & RIGHTMASK) >> 32) as u32 {     
+                        self.leftright.fetch_add(1, Ordering::Release);                   
+                        let response = Box::from_raw((*output).1);
+                        return Some(response);
                     } else {
-                        return Some(Box::from_raw(out));
+                        // println!("Well that was weird I couldn't pull {} cause the thingies no matchy", lval & LEFTMASK);
+                        // println!("the thingies are {} and {}", (*out).0, ((old_one & RIGHTMASK) >> 32) as u32);
+                        // println!("Here's some other stuff: ");
+                        // println!("Directed pop state: {this_left}");
+                        // println!("Claimed Op ID: {}", entry >> 32);
+                        // println!("Old Cmp Data: {} {}", old_one & RIGHTMASK >> 32, old_one & LEFTMASK);
+                        panic!("also should never happen;");
+                        println!("Oh shit, oh shit, oh shit, put it back!!");
+                        self.backing[(lval & LEFTMASK) as usize].0.store(out, Ordering::Release);
+                        return None;
                     }
                 }
             }
@@ -85,12 +138,13 @@ impl<T> Joque<T> {
         // reserve backing storage
         //  - unique until wrapped
         let backing_idx = self.idx.fetch_add(1, Ordering::Acquire); // TODO: 💀 after 400 write/read cycles
-        self.backing[backing_idx as usize].store(Box::into_raw(item), Ordering::SeqCst);
         loop {
             let this_right = self.fetch_extent_acq().1;
             let rval = self.deque[(this_right % self.capacity) as usize].load(Ordering::Acquire);
-            let entry = ((self.op_id.fetch_add(1, Ordering::Acquire) as usize) << 32) | backing_idx as usize;
+            let entry = ((self.op_id.fetch_add(1, Ordering::Acquire) as usize + 1) << 32) | backing_idx as usize;
             if self.deque[(this_right % self.capacity) as usize].compare_exchange(rval, entry, Ordering::Acquire, Ordering::Acquire).is_ok() {
+                let success_op = ((entry & RIGHTMASK) >> 32) as u32;
+                self.backing[backing_idx as usize].0.store(Joque::build_rj(success_op, item), Ordering::SeqCst);
                 self.leftright.fetch_add(ONE, Ordering::Acquire); // notice using ONE; a shifted value for the halfreg
                 break;
             }
@@ -101,27 +155,44 @@ impl<T> Joque<T> {
         loop {
             let (sens_left, sens_right) = self.fetch_extent_rel();
             if sens_left % self.capacity == sens_right % self.capacity { return None; }
-            let this_right = sens_right.wrapping_sub(1);
+            let this_right = sens_right.wrapping_sub(1) % self.capacity;
+            // println!("Trying to pop {this_right}");
             let rval = self.deque[(this_right % self.capacity) as usize].load(Ordering::Acquire);
             if rval & LEFTMASK == 0 { thread::yield_now(); return None; }
             let idx = 0;
-            let entry = ((self.op_id.fetch_add(1, Ordering::Release) as usize) << 32) | idx;
-            if let Ok(_old_one) = self.deque[(this_right % self.capacity) as usize]
+            let entry = ((self.op_id.fetch_add(1, Ordering::Release) as usize + 1) << 32) | idx;
+            if let Ok(old_one) = self.deque[(this_right % self.capacity) as usize]
                                             .compare_exchange(rval, entry, Ordering::Release, Ordering::Relaxed) {
                 // println!("Seeking from {}, ok", lval & LEFTMASK);
-                let out = self.backing[(rval & LEFTMASK) as usize].swap(std::ptr::null_mut(), Ordering::Release );
-                self.leftright.fetch_sub(ONE, Ordering::Release); // notice using ONE here
+                let out = self.backing[(rval & LEFTMASK) as usize].0.swap(Joque::build_null_rj(), Ordering::Acquire );
+                
                 unsafe { 
-                    if out.is_null() {
-                        // println!("Well that was weird I couldn't pull {}", rval & RIGHTMASK);
+                    let output = Box::from_raw(out);      
+                    if (*output).1.is_null() {
+                        // println!("Well that was weird pop_back couldn't pull {} cause out was null", rval & RIGHTMASK >> 32);
                         // println!("Here's some other stuff: ");
                         // println!("Directed pop state: {this_right}");
                         // println!("Claimed Op ID: {}", entry >> 32);
                         // println!("Old Cmp Data: {} {}", old_one & RIGHTMASK >> 32, old_one & LEFTMASK);
-                        panic!("This should not occur");
+                        // panic!("This should not occur");
                         //return None;
+                        // panic!("definitely should never happen;");
+                        return None;
+                    } else if (*out).0 == ((old_one & RIGHTMASK) >> 32) as u32 {     
+                        self.leftright.fetch_sub(ONE, Ordering::Release); // notice using ONE here             
+                        let response = Box::from_raw((*output).1);
+                        return Some(response);
                     } else {
-                        return Some(Box::from_raw(out));
+                        // println!("Well that was weird pop_back couldn't pull {} cause the thingies no matchy", rval & RIGHTMASK >> 32);
+                        // println!("the thingies are {} and {}", (*out).0, ((old_one & RIGHTMASK) >> 32) as u32);
+                        // println!("Here's some other stuff: ");
+                        // println!("Directed pop state: {this_right}");
+                        // println!("Claimed Op ID: {}", entry >> 32);
+                        // println!("Old Cmp Data: {} {}", old_one & RIGHTMASK >> 32, old_one & LEFTMASK);
+                        panic!("also should never happen;");
+                        println!("Oh shit, oh shit, oh shit, put it back!!");
+                        self.backing[(rval & LEFTMASK) as usize].0.store(out, Ordering::Release);
+                        return None;
                     }
                 }
             }
@@ -185,11 +256,24 @@ mod tests {
     }
 
     #[test]
+    pub fn basic_test_rev() {
+        let deque = Joque::new(25);
+
+        deque.push_back(Box::new("squirpy"));
+        deque.push_back(Box::new("squirp"));
+        deque.push_back(Box::new("squirp"));
+
+        assert_eq!("squirp", *deque.pop_back().unwrap());
+        assert_eq!("squirp", *deque.pop_back().unwrap());
+        assert_eq!("squirpy", *deque.pop_back().unwrap());
+    }
+
+    #[test]
     pub fn basic_wrap() {
         let deque = Joque::new(25);
 
-        for _i in 0..49 {
-            // print!("{i}");
+        for i in 0..49 {
+            // println!("dah dah dah, {i}");
             deque.push_front(Box::new("oogah"));
             deque.pop_back();
             
@@ -242,7 +326,7 @@ mod tests {
         let PAD_WIDTH = 0u32;
         let WIDTH = 4096;
         let LEFT_START = WIDTH / 2;
-        let RERUNS = 100;
+        let RERUNS = 1000;
         
         for _rerun in 0..RERUNS {
             // println!("~~~~~ {rerun} ~~~~~");
@@ -289,11 +373,11 @@ mod tests {
         
         // println!("trace");
         let THREAD_COUNT = 32u32;
-        let PAD_WIDTH = 0;
+        let PAD_WIDTH = 0u32;
         let WIDTH = 4096;
         let LEFT_START = WIDTH / 2;
         let RIGHT_START = LEFT_START;
-        let RERUNS = 100;
+        let RERUNS = 1000;
         
         for _rerun in 0..RERUNS {
             // println!("~~~~~ {rerun} ~~~~~");
