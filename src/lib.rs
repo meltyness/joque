@@ -33,7 +33,7 @@ impl<T> Joque<T> {
             panic!("let's not");
         }
         let left = width / 2;
-        let right = (left as usize) << 32;
+        let right = (left as usize + 1) << 32;
         Joque {
             deque: std::iter::from_fn(|| Some(AtomicUsize::new(0)))
                 .take(width as usize)
@@ -294,6 +294,48 @@ mod tests {
         assert_eq!("squirp", *deque.pop_back().unwrap());
         assert_eq!("squirp", *deque.pop_back().unwrap());
         assert_eq!("squirpy", *deque.pop_back().unwrap());
+    }
+
+    #[test]
+    pub fn basic_test_cross() {
+        let deque = Joque::new(25);
+
+        deque.push_back(Box::new("squirpy"));
+        deque.push_back(Box::new("squirp"));
+        deque.push_back(Box::new("squirp"));
+
+        assert_eq!("squirpy", *deque.pop_front().unwrap());
+        assert_eq!("squirp", *deque.pop_front().unwrap());
+        assert_eq!("squirp", *deque.pop_front().unwrap());
+
+        deque.push_front(Box::new("squirpy"));
+        deque.push_front(Box::new("squirp"));
+        deque.push_front(Box::new("squirp"));
+
+        assert_eq!("squirpy", *deque.pop_back().unwrap());
+        assert_eq!("squirp", *deque.pop_back().unwrap());
+        assert_eq!("squirp", *deque.pop_back().unwrap());
+    }
+
+    #[test]
+    pub fn basic_test_cross_rev() { 
+        let deque = Joque::new(25);
+        
+        deque.push_front(Box::new("squirpy"));
+        deque.push_front(Box::new("squirp"));
+        deque.push_front(Box::new("squirp"));
+
+        assert_eq!("squirpy", *deque.pop_back().unwrap());
+        assert_eq!("squirp", *deque.pop_back().unwrap());
+        assert_eq!("squirp", *deque.pop_back().unwrap());
+
+        deque.push_back(Box::new("squirpy"));
+        deque.push_back(Box::new("squirp"));
+        deque.push_back(Box::new("squirp"));
+
+        assert_eq!("squirpy", *deque.pop_front().unwrap());
+        assert_eq!("squirp", *deque.pop_front().unwrap());
+        assert_eq!("squirp", *deque.pop_front().unwrap());
     }
 
     #[test]
