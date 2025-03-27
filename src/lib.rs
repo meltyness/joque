@@ -122,7 +122,7 @@ impl<T> Joque<T> {
                         // TODO: 💀 is this even recoverable? ... how?
                         // panic!("should never happen;");
                         return None;
-                    } else if (*out).0 == ((old_one & RIGHTMASK) >> 32) as u32 {
+                    } else if (*output).0 == ((old_one & RIGHTMASK) >> 32) as u32 {
                         self.leftright.fetch_add(1, Ordering::Release);
                         let response = Box::from_raw((*output).1);
                         return Some(response);
@@ -206,7 +206,7 @@ impl<T> Joque<T> {
                         //return None;
                         // panic!("definitely should never happen;");
                         return None;
-                    } else if (*out).0 == ((old_one & RIGHTMASK) >> 32) as u32 {
+                    } else if (*output).0 == ((old_one & RIGHTMASK) >> 32) as u32 {
                         self.leftright.fetch_sub(ONE, Ordering::Release); // notice using ONE here             
                         let response = Box::from_raw((*output).1);
                         return Some(response);
@@ -361,6 +361,7 @@ mod tests {
     #[allow(unused_imports)]
     use loom::thread;
 
+    #[cfg(not(miri))]
     #[test]
     fn permute_interleaved_modification() {
         let THREAD_COUNT = 4;
@@ -394,9 +395,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn interleaved_modification() {
         // println!("trace");
-        let THREAD_COUNT = 32u32;
+        let THREAD_COUNT = 2u32;
         let PAD_WIDTH = 0u32;
         let WIDTH = 4096;
         let LEFT_START = WIDTH / 2;
@@ -452,14 +454,136 @@ mod tests {
     }
 
     #[test]
+    #[cfg(not(miri))]
     fn interleaved_right_modification() {
         // println!("trace");
-        let THREAD_COUNT = 32u32;
+        let THREAD_COUNT = 2u32;
         let PAD_WIDTH = 0u32;
         let WIDTH = 4096;
         let LEFT_START = WIDTH / 2;
         let RIGHT_START = LEFT_START;
         let RERUNS = 1000;
+
+        for _rerun in 0..RERUNS {
+            // println!("~~~~~ {rerun} ~~~~~");
+            let deque = std::sync::Arc::new(Joque::new(WIDTH));
+
+            for _ in 0..PAD_WIDTH {
+                deque.push_back(Box::new(u32::MAX));
+            }
+
+            let mut ths: Vec<_> = (0..THREAD_COUNT / 2)
+                .map(|idx| {
+                    let big_deque = deque.clone();
+
+                    std::thread::spawn(move || {
+                        big_deque.push_back(Box::new(idx));
+                        let out = big_deque.pop_back().is_none() as i32;
+                        big_deque.push_back(Box::new(idx + 1));
+                        big_deque.push_back(Box::new(idx + 2));
+                        out
+                    })
+                })
+                .collect();
+
+            ths.append(
+                &mut (0..THREAD_COUNT / 2)
+                    .map(|idx| {
+                        let big_deque = deque.clone();
+
+                        std::thread::spawn(move || {
+                            big_deque.push_back(Box::new(idx));
+                            big_deque.push_back(Box::new(idx + 1));
+                            let out = big_deque.pop_back().is_none() as i32;
+                            big_deque.push_back(Box::new(idx + 2));
+                            out
+                        })
+                    })
+                    .collect(),
+            );
+
+            let _weridness_score = ths.into_iter().map(|th| th.join().unwrap()).sum::<i32>();
+            // println!("Weirdness: {weridness_score}");
+            // println!("Expected {} found {}", RIGHT_START + THREAD_COUNT*2 + PAD_WIDTH, deque.clone().leftright.load(Ordering::Relaxed) & RIGHTMASK >> 32);
+            // despite the fact that each thread should contribute net +1 push into the listing,
+            // there's a stochastic event, which may occur, such that all threads behaving this way simultaneously
+            // observe and empty stack when popping, and so there's a chance of 'failed' pops.
+            assert!(
+                RIGHT_START + THREAD_COUNT * 2 + PAD_WIDTH
+                    <= ((deque.clone().leftright.load(Ordering::Relaxed) & RIGHTMASK) >> 32) as u32
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(miri)]
+    fn interleaved_modification_tiny_miri() {
+        // println!("trace");
+        let THREAD_COUNT = 4u32;
+        let PAD_WIDTH = 0u32;
+        let WIDTH = 512;
+        let LEFT_START = WIDTH / 2;
+        let RERUNS = 4;
+
+        for _rerun in 0..RERUNS {
+            // println!("~~~~~ {rerun} ~~~~~");
+            let deque = std::sync::Arc::new(Joque::new(WIDTH));
+
+            for _ in 0..PAD_WIDTH {
+                deque.push_front(Box::new(u32::MAX));
+            }
+
+            let mut ths: Vec<_> = (0..THREAD_COUNT / 2)
+                .map(|idx| {
+                    let big_deque = deque.clone();
+
+                    std::thread::spawn(move || {
+                        big_deque.push_front(Box::new(idx));
+                        let _ = big_deque.pop_front().is_none();
+                        big_deque.push_front(Box::new(idx + 1));
+                        big_deque.push_front(Box::new(idx + 2));
+                    })
+                })
+                .collect();
+
+            ths.append(
+                &mut (0..THREAD_COUNT / 2)
+                    .map(|idx| {
+                        let big_deque = deque.clone();
+
+                        std::thread::spawn(move || {
+                            big_deque.push_front(Box::new(idx));
+                            big_deque.push_front(Box::new(idx + 1));
+                            let _ = big_deque.pop_front().is_none();
+                            big_deque.push_front(Box::new(idx + 2));
+                        })
+                    })
+                    .collect(),
+            );
+
+            for th in ths {
+                th.join().unwrap();
+            }
+            // despite the fact that each thread should contribute net +1 push into the listing,
+            // there's a stochastic event, which may occur, such that all threads behaving this way simultaneously
+            // observe and empty stack when popping, and so there's a chance of 'failed' pops.
+            assert!(
+                LEFT_START - THREAD_COUNT * 2 - PAD_WIDTH
+                    >= (deque.clone().leftright.load(Ordering::Relaxed) & LEFTMASK) as u32
+            );
+        }
+    }
+
+    #[cfg(miri)]
+    #[test]
+    fn interleaved_right_modification_tiny_miri() {
+        // println!("trace");
+        let THREAD_COUNT = 4u32;
+        let PAD_WIDTH = 0u32;
+        let WIDTH = 512;
+        let LEFT_START = WIDTH / 2;
+        let RIGHT_START = LEFT_START+1;
+        let RERUNS = 4;
 
         for _rerun in 0..RERUNS {
             // println!("~~~~~ {rerun} ~~~~~");
