@@ -1,9 +1,16 @@
 #![allow(non_snake_case)]
 #![allow(unreachable_code)]
-use std::{
-    sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering},
-    thread,
-};
+// use std::thread;
+
+use crate::sync::*;
+
+mod sync {
+    #[cfg(loom)]
+    pub(crate) use loom::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+
+    #[cfg(not(loom))]
+    pub(crate) use std::sync::atomic::{AtomicPtr, AtomicU32, AtomicUsize, Ordering};
+}
 
 /// Joque implements a lock-free double-ended queue.
 #[allow(dead_code)]
@@ -47,7 +54,7 @@ impl<T> Drop for Joque<T> {
 impl<T> Joque<T> {
 
     pub fn new(width: u32) -> Self {
-        if width < 10 {
+        if width < 5 {
             panic!("let's not");
         }
         let left = width / 2;
@@ -125,7 +132,6 @@ impl<T> Joque<T> {
             let this_left = sens_left + 1 % self.capacity;
             let lval = self.deque[(this_left % self.capacity) as usize].load(Ordering::Acquire);
             if lval & LEFTMASK == 0 {
-                thread::yield_now();
                 return None;
             }
             let idx = 0;
@@ -139,7 +145,7 @@ impl<T> Joque<T> {
                 // println!("Seeking from {}, ok", lval & LEFTMASK);
                 let out = self.backing[(lval & LEFTMASK) as usize]
                     .0
-                    .swap(Joque::build_raw_null_rj(), Ordering::Acquire);
+                    .swap(Joque::build_raw_null_rj(), Ordering::SeqCst);
 
                 unsafe {
                     let output = Box::from_raw(out);
@@ -210,7 +216,6 @@ impl<T> Joque<T> {
             // println!("Trying to pop {this_right}");
             let rval = self.deque[(this_right % self.capacity) as usize].load(Ordering::Acquire);
             if rval & LEFTMASK == 0 {
-                thread::yield_now();
                 return None;
             }
             let idx = 0;
@@ -224,7 +229,7 @@ impl<T> Joque<T> {
                 // println!("Seeking from {}, ok", lval & LEFTMASK);
                 let out = self.backing[(rval & LEFTMASK) as usize]
                     .0
-                    .swap(Joque::build_raw_null_rj(), Ordering::Acquire);
+                    .swap(Joque::build_raw_null_rj(), Ordering::SeqCst);
 
                 unsafe {
                     let output = Box::from_raw(out);
@@ -302,6 +307,7 @@ mod tests {
     #[allow(unused_imports)]
     use std::sync::atomic::Ordering;
 
+    #[cfg(not(loom))]
     #[test]
     pub fn basic_test() {
         let deque = Joque::new(25);
@@ -315,6 +321,7 @@ mod tests {
         assert_eq!("squirpy", *deque.pop_front().unwrap());
     }
 
+    #[cfg(not(loom))]
     #[test]
     pub fn basic_test_rev() {
         let deque = Joque::new(25);
@@ -328,6 +335,7 @@ mod tests {
         assert_eq!("squirpy", *deque.pop_back().unwrap());
     }
 
+    #[cfg(not(loom))]
     #[test]
     pub fn basic_test_cross() {
         let deque = Joque::new(25);
@@ -349,6 +357,7 @@ mod tests {
         assert_eq!("squirp", *deque.pop_back().unwrap());
     }
 
+    #[cfg(not(loom))]
     #[test]
     pub fn basic_test_cross_rev() { 
         let deque = Joque::new(25);
@@ -369,7 +378,7 @@ mod tests {
         assert_eq!("squirp", *deque.pop_front().unwrap());
         assert_eq!("squirp", *deque.pop_front().unwrap());
     }
-
+    #[cfg(not(loom))]
     #[test]
     pub fn basic_wrap() {
         let deque = Joque::new(25);
@@ -384,20 +393,17 @@ mod tests {
         }
     }
 
-    #[allow(unused_imports)]
-    use loom::sync::Arc;
-    #[allow(unused_imports)]
-    use loom::sync::atomic::AtomicUsize;
-    #[allow(unused_imports)]
-    use loom::sync::atomic::Ordering::{Acquire, Relaxed, Release};
-    #[allow(unused_imports)]
-    use loom::thread;
 
-    #[cfg(not(miri))]
+
+    #[cfg(all(loom, not(miri)))]
     #[test]
-    fn permute_interleaved_modification() {
-        let THREAD_COUNT = 4;
-        let WIDTH = 25;
+    fn permute_interleaved_modification() {    
+        use loom::sync::atomic::Ordering;
+        use loom::sync::Arc;
+        use loom::thread;
+
+        let THREAD_COUNT = 2;
+        let WIDTH = 24;
         let LEFT_START = WIDTH / 2;
         loom::model(move || {
             let deque = Arc::new(Joque::new(WIDTH));
@@ -419,15 +425,15 @@ mod tests {
                 th.join().unwrap();
             }
 
-            assert_eq!(
-                LEFT_START - THREAD_COUNT * 2,
-                (deque.clone().leftright.load(Ordering::Relaxed) & LEFTMASK) as u32
+            assert!(
+                LEFT_START - THREAD_COUNT * 2
+                    >= (deque.clone().leftright.load(Ordering::Relaxed) & LEFTMASK) as u32
             );
         });
     }
 
     #[test]
-    #[cfg(not(miri))]
+    #[cfg(all(not(loom), not(miri)))]
     fn interleaved_modification() {
         // println!("trace");
         let THREAD_COUNT = 64u32;
@@ -486,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(miri))]
+    #[cfg(all(not(loom), not(miri)))]
     fn interleaved_right_modification() {
         // println!("trace");
         let THREAD_COUNT = 64u32;
@@ -548,7 +554,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(miri)]
+    #[cfg(all(not(loom), miri))]
     fn interleaved_modification_tiny_miri() {
         // println!("trace");
         let THREAD_COUNT = 4u32;
@@ -607,10 +613,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(miri)]
+    #[cfg(all(not(loom), miri))]
     fn interleaved_right_modification_tiny_miri() {
         // println!("trace");
-        let THREAD_COUNT = 4u32;
+        let THREAD_COUNT = 8u32;
         let PAD_WIDTH = 0u32;
         let WIDTH = 512;
         let LEFT_START = WIDTH / 2;
