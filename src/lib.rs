@@ -101,21 +101,21 @@ impl<T> Joque<T> {
     }
 
     pub fn push_front(&self, item: Box<T>) {
-        let backing_idx = self.idx.fetch_add(1, Ordering::Acquire); // TODO: 💀 after 400 write/read cycles
+        let backing_idx = self.idx.fetch_add(1, Ordering::Relaxed); // TODO: 💀 after 400 write/read cycles
         loop {
-            let this_left = self.fetch_extent_acq().0 % self.capacity;
+            let this_left = self.fetch_extent_rel().0 % self.capacity;
             // println!("Trying to push {this_left}");
-            let lval = self.deque[(this_left % self.capacity) as usize].load(Ordering::Acquire);
-            let entry = ((self.op_id.fetch_add(1, Ordering::Acquire) as usize + 1) << 32)
+            let lval = self.deque[(this_left % self.capacity) as usize].load(Ordering::Relaxed);
+            let entry = ((self.op_id.fetch_add(1, Ordering::Relaxed) as usize + 1) << 32)
                 | backing_idx as usize;
             if self.deque[(this_left % self.capacity) as usize]
-                .compare_exchange(lval, entry, Ordering::Acquire, Ordering::Acquire)
+                .compare_exchange(lval, entry, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
                 let success_op = ((entry & RIGHTMASK) >> 32) as u32;
                 let release = self.backing[backing_idx as usize]
                     .0
-                    .swap(Joque::build_raw_rj(success_op, item), Ordering::SeqCst);
+                    .swap(Joque::build_raw_rj(success_op, item), Ordering::AcqRel);
                 Joque::release_null_rj(release);
                 self.leftright.fetch_sub(1, Ordering::Acquire);
                 break;
@@ -135,7 +135,7 @@ impl<T> Joque<T> {
                 return None;
             }
             let idx = 0;
-            let entry = ((self.op_id.fetch_add(1, Ordering::Release) as usize + 1) << 32) | idx;
+            let entry = ((self.op_id.fetch_add(1, Ordering::Acquire) as usize + 1) << 32) | idx;
             if let Ok(old_one) = self.deque[(this_left % self.capacity) as usize].compare_exchange(
                 lval,
                 entry,
@@ -145,7 +145,7 @@ impl<T> Joque<T> {
                 // println!("Seeking from {}, ok", lval & LEFTMASK);
                 let out = self.backing[(lval & LEFTMASK) as usize]
                     .0
-                    .swap(Joque::build_raw_null_rj(), Ordering::SeqCst);
+                    .swap(Joque::build_raw_null_rj(), Ordering::AcqRel);
 
                 unsafe {
                     let output = Box::from_raw(out);
@@ -185,20 +185,20 @@ impl<T> Joque<T> {
     pub fn push_back(&self, item: Box<T>) {
         // reserve backing storage
         //  - unique until wrapped
-        let backing_idx = self.idx.fetch_add(1, Ordering::Acquire); // TODO: 💀 after 400 write/read cycles
+        let backing_idx = self.idx.fetch_add(1, Ordering::Relaxed); // TODO: 💀 after 400 write/read cycles
         loop {
-            let this_right = self.fetch_extent_acq().1;
-            let rval = self.deque[(this_right % self.capacity) as usize].load(Ordering::Acquire);
-            let entry = ((self.op_id.fetch_add(1, Ordering::Acquire) as usize + 1) << 32)
+            let this_right = self.fetch_extent_rel().1;
+            let rval = self.deque[(this_right % self.capacity) as usize].load(Ordering::Relaxed);
+            let entry = ((self.op_id.fetch_add(1, Ordering::Relaxed) as usize + 1) << 32)
                 | backing_idx as usize;
             if self.deque[(this_right % self.capacity) as usize]
-                .compare_exchange(rval, entry, Ordering::Acquire, Ordering::Acquire)
+                .compare_exchange(rval, entry, Ordering::Acquire, Ordering::Relaxed)
                 .is_ok()
             {
                 let success_op = ((entry & RIGHTMASK) >> 32) as u32;
                 let release = self.backing[backing_idx as usize]
                     .0
-                    .swap(Joque::build_raw_rj(success_op, item), Ordering::SeqCst);
+                    .swap(Joque::build_raw_rj(success_op, item), Ordering::AcqRel);
                 Joque::release_null_rj(release);
                 self.leftright.fetch_add(ONE, Ordering::Acquire); // notice using ONE; a shifted value for the halfreg
                 break;
@@ -214,12 +214,12 @@ impl<T> Joque<T> {
             }
             let this_right = sens_right.wrapping_sub(1) % self.capacity;
             // println!("Trying to pop {this_right}");
-            let rval = self.deque[(this_right % self.capacity) as usize].load(Ordering::Acquire);
+            let rval = self.deque[(this_right % self.capacity) as usize].load(Ordering::Relaxed);
             if rval & LEFTMASK == 0 {
                 return None;
             }
             let idx = 0;
-            let entry = ((self.op_id.fetch_add(1, Ordering::Release) as usize + 1) << 32) | idx;
+            let entry = ((self.op_id.fetch_add(1, Ordering::Relaxed) as usize + 1) << 32) | idx;
             if let Ok(old_one) = self.deque[(this_right % self.capacity) as usize].compare_exchange(
                 rval,
                 entry,
@@ -229,7 +229,7 @@ impl<T> Joque<T> {
                 // println!("Seeking from {}, ok", lval & LEFTMASK);
                 let out = self.backing[(rval & LEFTMASK) as usize]
                     .0
-                    .swap(Joque::build_raw_null_rj(), Ordering::SeqCst);
+                    .swap(Joque::build_raw_null_rj(), Ordering::AcqRel);
 
                 unsafe {
                     let output = Box::from_raw(out);
